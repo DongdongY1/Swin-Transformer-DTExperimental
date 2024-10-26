@@ -107,10 +107,15 @@ class WindowAttention(nn.Module):
         coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
         coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+        '''
+        (2, hw, 1) - (2, 1, hw), since broadcast would be activated, it would be like a diffusion matrix with a 
+        subtraction (note the shape of hw, 1 and 1, hw are like col and row), hence it's expanded into (2, hw, hw).
+        It is the best practice when we wish to calculate inter-sequence pairwise results.
+        '''
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
-        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
+        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0 (e.g. (0, 0) is for the down-right to the upper-left)
         relative_coords[:, :, 1] += self.window_size[1] - 1
-        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1 # to add diversity? expand range?
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
         self.register_buffer("relative_position_index", relative_position_index)
 
@@ -128,9 +133,12 @@ class WindowAttention(nn.Module):
             x: input features with shape of (num_windows*B, N, C)
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
-        B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        B_, N, C = x.shape # expanded batch shape, whatever. We just care about inner-window calculation
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4) # (b_, N, 3c) -> (3, b_, heads, N, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        # q, k, v = torch.split(qkv[0], C // self.num_heads // 2, -1), torch.split(qkv[1], C // self.num_heads // 2, -1), qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        # q1, q2 = q # no need to make torchscript happy cuz it returns tuple
+        # k1, k2 = k
 
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
