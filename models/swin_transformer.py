@@ -371,7 +371,7 @@ class SwinTransformerBlock(nn.Module):
 
         shortcut = x
         x = self.norm1(x)
-        x = x.view(B, H, W, C)
+        x = x.view(B, H, W, C).contiguous()
 
         # cyclic shift
         if self.shift_size > 0:
