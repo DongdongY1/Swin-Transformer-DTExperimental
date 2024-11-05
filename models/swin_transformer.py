@@ -72,14 +72,17 @@ class SwiGLU(nn.Module):
         """
         # Apply the gates
         g = torch.nn.functional.silu(self.WG(x))  # Activation part
+        assert not torch.any(torch.isnan(g))
         z = self.W1(x)            # Linear part
         # Element-wise multiplication and projection
-        return self.W2(g * z)
+        ret = self.W2(g * z)
+        assert not torch.any(torch.isnan(ret))
+        return ret
 
 
 # https://github.com/microsoft/unilm/blob/master/Diff-Transformer/rms_norm.py
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True, memory_efficient=False):
+    def __init__(self, dim: int, eps: float = 1e-5, elementwise_affine=True, memory_efficient=False):
         super().__init__()
         self.dim = dim
         self.eps = eps
@@ -93,9 +96,12 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
+        assert not torch.any(torch.isnan(x))
+        output = self._norm(x) # original version with x.float(). Probly better not to cast when amp is enabled
+        assert not torch.any(torch.isnan(output))
         if self.weight is not None:
             output = output * self.weight
+            assert not torch.any(torch.isnan(output))
         return output
 
     def extra_repr(self) -> str:

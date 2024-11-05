@@ -11,6 +11,7 @@ import json
 import random
 import argparse
 import datetime
+import math
 import numpy as np
 
 import torch
@@ -31,7 +32,7 @@ from utils import load_checkpoint, load_pretrained, save_checkpoint, NativeScale
 
 # pytorch major version (1.x or 2.x)
 PYTORCH_MAJOR_VERSION = int(torch.__version__.split('.')[0])
-
+torch.autograd.set_detect_anomaly(True)
 
 def parse_option():
     parser = argparse.ArgumentParser('Swin Transformer training and evaluation script', add_help=False)
@@ -190,6 +191,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
+        assert not torch.any(torch.isnan(samples) + torch.isinf(samples))
+        assert not torch.any(torch.isnan(targets) + torch.isinf(targets))
+
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             outputs = model(samples)
         loss = criterion(outputs, targets)
@@ -197,9 +201,10 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
 
         # this attribute is added by timm on one optimizer (adahessian)
         is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-        grad_norm = loss_scaler(loss, optimizer, clip_grad=config.TRAIN.CLIP_GRAD,
-                                parameters=model.parameters(), create_graph=is_second_order,
-                                update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0)
+        with torch.autograd.detect_anomaly():
+            grad_norm = loss_scaler(loss, optimizer, clip_grad=config.TRAIN.CLIP_GRAD,
+                                    parameters=model.parameters(), create_graph=is_second_order,
+                                    update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0)
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
             optimizer.zero_grad()
             lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
@@ -227,6 +232,12 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
                 f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
                 f'mem {memory_used:.0f}MB')
+        elif math.isinf(norm_meter.val) or math.isnan(norm_meter.val):
+            logger.info(f'Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
+                        f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
+                        f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
+                        f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t')
+            
     epoch_time = time.time() - start
     logger.info(f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
 
