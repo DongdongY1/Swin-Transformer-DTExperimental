@@ -93,7 +93,13 @@ class RMSNorm(nn.Module):
             self.register_parameter('weight', None)
 
     def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        pow2 = x.pow(2)
+        if torch.any(torch.isnan(pow2)):
+            print(f"Nan!!!, x: {x},\n pow2: {pow2}")
+
+        mean = pow2.nanmean(-1, keepdim=True)
+        factor = torch.rsqrt(mean + self.eps)
+        return x * factor
 
     def forward(self, x):
         assert not torch.any(torch.isnan(x))
@@ -157,10 +163,11 @@ class WindowAttention(nn.Module):
         attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
         proj_drop (float, optional): Dropout ratio of output. Default: 0.0
         lambda_init (float, optional): Initial value for lambda. Default: 0.8
-        use_groupnorm (bool, optional): If true, use groupnorm proposed in Differential Transformer. Default: True
+        use_groupnorm (bool, optional): If true, use groupnorm as stated in Differential Transformer. Default: True
+        use_diffattn (bool, optional): If true, use differential attention as stated in Differential Transformer. Default: True
     """
 
-    def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0., lambda_init=0.8, use_groupnorm=True):
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0., lambda_init=0.8, use_groupnorm=True, use_diffattn=True):
 
         super().__init__()
         self.dim = dim
@@ -171,14 +178,23 @@ class WindowAttention(nn.Module):
         self.scale = qk_scale or (head_dim // 2) ** -0.5 # note that we use the V dim as head_dim to align with original swin hyparam
         self.lambda_init = lambda_init
         self.use_groupnorm = use_groupnorm
+        self.use_diffattn = use_diffattn
         if use_groupnorm:
             self.groupnorm = RMSNorm(head_dim)
+        else:
+            self.register_parameter('groupnorm', None)
 
         # Learnable parameters for lambda reparameterization
-        self.lambda_q1 = nn.Parameter(torch.randn(head_dim//2))
-        self.lambda_k1 = nn.Parameter(torch.randn(head_dim//2))
-        self.lambda_q2 = nn.Parameter(torch.randn(head_dim//2))
-        self.lambda_k2 = nn.Parameter(torch.randn(head_dim//2))
+        if self.use_diffattn:
+            self.lambda_q1 = nn.Parameter(torch.randn(head_dim//2))
+            self.lambda_k1 = nn.Parameter(torch.randn(head_dim//2))
+            self.lambda_q2 = nn.Parameter(torch.randn(head_dim//2))
+            self.lambda_k2 = nn.Parameter(torch.randn(head_dim//2))
+        else:
+            self.register_parameter('lambda_q1', None)
+            self.register_parameter('lambda_q2', None)
+            self.register_parameter('lambda_k1', None)
+            self.register_parameter('lambda_k2', None)
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
@@ -218,49 +234,55 @@ class WindowAttention(nn.Module):
         """
         B_, N, C = x.shape # expanded batch shape, whatever. We just care about inner-window calculation
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4) # (b_, N, 3c) -> (3, b_, heads, N, head_dim)
-        #q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
-        q, k, v = torch.split(qkv[0], C // self.num_heads // 2, -1), torch.split(qkv[1], C // self.num_heads // 2, -1), qkv[2]  # make torchscript happy (cannot use tensor as tuple)
-        q1, q2 = q # no need to make torchscript happy cuz it returns tuple, (b_, heads, N, head_dim/2)
-        k1, k2 = k
 
-        #q = q * self.scale
-        #attn = (q @ k.transpose(-2, -1))
-
-        attn1, attn2= (q1 @ k1.transpose(-2, -1)) * self.scale, (q2 @ k2.transpose(-2, -1)) * self.scale  #(b_, heads, N, N)
+        if self.use_diffattn: 
+            q, k, v = torch.split(qkv[0], C // self.num_heads // 2, -1), torch.split(qkv[1], C // self.num_heads // 2, -1), qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+            q1, q2 = q # no need to make torchscript happy cuz it returns tuple, (b_, heads, N, head_dim/2)
+            k1, k2 = k
+            attn1, attn2= (q1 @ k1.transpose(-2, -1)) * self.scale, (q2 @ k2.transpose(-2, -1)) * self.scale  #(b_, heads, N, N)
+            attn = torch.stack((attn1, attn2)) #(2, b_, heads, N, N)
+        else:
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+            q = q * self.scale
+            attn = (q @ k.transpose(-2, -1)) #(b_, heads, N, N)
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        # attn = attn + relative_position_bias.unsqueeze(0)
-        attn1, attn2 = attn1 + relative_position_bias.unsqueeze(0), attn2 + relative_position_bias.unsqueeze(0)
+
+        attn = attn + relative_position_bias
+        #attn1, attn2 = attn1 + relative_position_bias.unsqueeze(0), attn2 + relative_position_bias.unsqueeze(0)
 
         if mask is not None:
             nW = mask.shape[0] # num_windows
             #attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
             #attn = attn.view(-1, self.num_heads, N, N)
-            attn1 = attn1.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
-            attn2 = attn2.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            #attn1 = attn1.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            #attn2 = attn2.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1) # (2/1, b, nW, heads, N, N)
 
-            attn1, attn2 = attn1.view(-1, self.num_heads, N, N), attn2.view(-1, self.num_heads, N, N) # (B_, heads, N, N)
+            #attn1, attn2 = attn1.view(-1, self.num_heads, N, N), attn2.view(-1, self.num_heads, N, N) # (B_, heads, N, N)
+            attn = attn.view(-1, B_, self.num_heads, N, N) # (2/1, b_, heads, N, N)
             
-            # attn = self.softmax(attn)
-            attn1, attn2 = self.softmax(attn1), self.softmax(attn2)
+            #attn1, attn2 = self.softmax(attn1), self.softmax(attn2)
+            attn = self.softmax(attn)
         else:
-            #attn = self.softmax(attn)
-            attn1, attn2 = self.softmax(attn1), self.softmax(attn2)
+            #attn1, attn2 = self.softmax(attn1), self.softmax(attn2)
+            attn = self.softmax(attn)
 
-        #attn = self.attn_drop(attn)
-        attn1, attn2 = self.attn_drop(attn1), self.attn_drop(attn2) 
+        #attn1, attn2 = self.attn_drop(attn1), self.attn_drop(attn2)
+        attn = self.attn_drop(attn)
 
-        lambda_ = torch.exp(self.lambda_q1 @ self.lambda_k1) - torch.exp(self.lambda_q2 @ self.lambda_k2) + self.lambda_init
-
-        x = ((attn1 - lambda_ * attn2) @ v).transpose(1, 2)
+        if self.use_diffattn:
+            lambda_ = torch.exp(self.lambda_q1 @ self.lambda_k1) - torch.exp(self.lambda_q2 @ self.lambda_k2) + self.lambda_init
+            x = ((attn[0] - lambda_ * attn[1]) @ v).transpose(1, 2) # B_, N, heads, head_dim
+            x *= (1 - self.lambda_init)
+        else:
+            x = (attn @ v).transpose(1, 2) #.reshape(B_, N, C)
 
         if self.use_groupnorm:
-            x = self.groupnorm(x) # (B_, heads, N, head_dim)
+            x = self.groupnorm(x) # (B_, N, heads, head_dim)
 
-        #x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
-        x *= (1 - self.lambda_init)
         x = x.reshape(B_, N, C) #  ->(B_, heads, N, head_dim) and concats to (B_, N, dimC)
 
         x = self.proj(x)
@@ -305,6 +327,7 @@ class SwinTransformerBlock(nn.Module):
         fused_window_process (bool, optional): If True, use one kernel to fused window shift & window partition for acceleration, similar for the reversed part. Default: False
         use_groupnorm (bool, optional): If true, use groupnorm proposed in Differential Transformer. Default: True
         use_swiglu (bool, optional): If truem, use swiglu for mlp. Default: True
+        use_diffattn (bool, optional): If true, use differential attention as stated in Differential Transformer. Default: True
     """
 
     def __init__(self, dim, input_resolution, num_heads, depth_index, window_size=7, shift_size=0,
@@ -312,7 +335,8 @@ class SwinTransformerBlock(nn.Module):
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm,
                  fused_window_process=False,
                  use_groupnorm=True,
-                 use_swiglu=True):
+                 use_swiglu=True,
+                 use_diffattn=True):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
@@ -329,11 +353,12 @@ class SwinTransformerBlock(nn.Module):
         
         self.use_groupnorm = use_groupnorm
         lambda_init = lambda_init_fn(depth_index)
+        self.use_diffattn = use_diffattn
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
             dim, lambda_init=lambda_init, window_size=to_2tuple(self.window_size), num_heads=num_heads,
-            qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, use_groupnorm=self.use_groupnorm)
+            qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, use_groupnorm=self.use_groupnorm, use_diffattn=self.use_diffattn)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -506,8 +531,9 @@ class BasicLayer(nn.Module):
         downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
         fused_window_process (bool, optional): If True, use one kernel to fused window shift & window partition for acceleration, similar for the reversed part. Default: False
-        use_groupnorm (bool, optional): If true, use groupnorm proposed in Differential Transformer. Default: True
-        use_swiglu (bool, optional): If truem, use swiglu for mlp. Default: True
+        use_groupnorm (bool, optional): If true, use groupnorm stated in Differential Transformer. Default: True
+        use_swiglu (bool, optional): If true, use swiglu for mlp. Default: True
+        use_diffattn (bool, optional): If true, use differential attention as stated in Differential Transformer. Default: True
     """
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size, block_index,
@@ -515,7 +541,8 @@ class BasicLayer(nn.Module):
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
                  fused_window_process=False,
                  use_groupnorm=True,
-                 use_swiglu=True):
+                 use_swiglu=True,
+                 use_diffattn=True):
 
         super().__init__()
         self.dim = dim
@@ -535,7 +562,8 @@ class BasicLayer(nn.Module):
                                  norm_layer=norm_layer,
                                  fused_window_process=fused_window_process,
                                  use_groupnorm=use_groupnorm,
-                                 use_swiglu=use_swiglu)
+                                 use_swiglu=use_swiglu,
+                                 use_diffattn=use_diffattn)
             for i in range(depth)])
 
         # patch merging layer
@@ -641,6 +669,7 @@ class SwinTransformer(nn.Module):
         fused_window_process (bool, optional): If True, use one kernel to fused window shift & window partition for acceleration, similar for the reversed part. Default: False
         use_groupnorm (bool, optional): If true, use groupnorm proposed in Differential Transformer. Default: True
         use_swiglu (bool, optional): If truem, use swiglu for mlp. Default: True
+        use_diffattn (bool, optional): If true, use differential attention as stated in Differential Transformer. Default: True
     """
 
     def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000,
@@ -649,7 +678,7 @@ class SwinTransformer(nn.Module):
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
                  use_checkpoint=False, fused_window_process=False,
-                 use_groupnorm=True, use_swiglu=True, **kwargs):
+                 use_groupnorm=True, use_swiglu=True, use_diffattn=True, **kwargs):
         super().__init__()
 
         self.num_classes = num_classes
@@ -698,7 +727,8 @@ class SwinTransformer(nn.Module):
                                use_checkpoint=use_checkpoint,
                                fused_window_process=fused_window_process,
                                use_groupnorm=use_groupnorm,
-                               use_swiglu=use_swiglu)
+                               use_swiglu=use_swiglu,
+                               use_diffattn=use_diffattn)
             self.layers.append(layer)
 
         self.norm = norm_layer(self.num_features)

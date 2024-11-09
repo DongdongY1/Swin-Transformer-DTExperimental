@@ -54,7 +54,8 @@ def build_model(config, is_pretrain=False):
                                 use_checkpoint=config.TRAIN.USE_CHECKPOINT,
                                 fused_window_process=config.FUSED_WINDOW_PROCESS,
                                 use_groupnorm=config.MODEL.USE_GROUPNORM,
-                                use_swiglu=config.MODEL.USE_SWIGLU)
+                                use_swiglu=config.MODEL.USE_SWIGLU,
+                                use_diffattn=config.MODEL.USE_DIFFATTN)
     elif model_type == 'swinv2':
         model = SwinTransformerV2(img_size=config.DATA.IMG_SIZE,
                                   patch_size=config.MODEL.SWINV2.PATCH_SIZE,

@@ -201,10 +201,10 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
 
         # this attribute is added by timm on one optimizer (adahessian)
         is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-        with torch.autograd.detect_anomaly():
-            grad_norm = loss_scaler(loss, optimizer, clip_grad=config.TRAIN.CLIP_GRAD,
-                                    parameters=model.parameters(), create_graph=is_second_order,
-                                    update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0)
+        #with torch.autograd.detect_anomaly():
+        grad_norm = loss_scaler(loss, optimizer, clip_grad=config.TRAIN.CLIP_GRAD,
+                                parameters=model.parameters(), create_graph=is_second_order,
+                                update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0)
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
             optimizer.zero_grad()
             lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)

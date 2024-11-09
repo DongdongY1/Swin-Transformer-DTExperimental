@@ -7,6 +7,7 @@ MODEL:
   USE_RMSNORM: True
   USE_GROUPNORM: True
   USE_SWIGLU: True
+  USE_DIFFATTN: True
   SWIN:
     EMBED_DIM: 96
     DEPTHS: [ 2, 2, 6, 2 ]
