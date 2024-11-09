@@ -72,6 +72,7 @@ _C.MODEL.LABEL_SMOOTHING = 0.1
 _C.MODEL.USE_RMSNORM = True
 _C.MODEL.USE_GROUPNORM = True
 _C.MODEL.USE_SWIGLU = True
+_C.MODEL.USE_DIFFATTN = True
 
 
 # Swin Transformer parameters

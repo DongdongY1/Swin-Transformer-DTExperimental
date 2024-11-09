@@ -99,6 +99,7 @@ class RMSNorm(nn.Module):
 
         mean = pow2.nanmean(-1, keepdim=True)
         factor = torch.rsqrt(mean + self.eps)
+        assert not torch.any(torch.isnan(factor)), f"Nan in factor!!, \n mean: {mean}, \n factor: {factor}"
         return x * factor
 
     def forward(self, x):
