@@ -100,7 +100,14 @@ class RMSNorm(nn.Module):
         mean = pow2.nanmean(-1, keepdim=True)
         factor = torch.rsqrt(mean + self.eps)
         assert not torch.any(torch.isnan(factor)), f"Nan in factor!!, \n mean: {mean}, \n factor: {factor}"
-        return x * factor
+        ret = x * factor
+        if torch.any(torch.isnan(ret)):
+            nan_idx = torch.where(torch.isnan(ret))
+            x_vals = x[nan_idx]
+            nan_idx_factor = tuple((*nan_idx[:-1], torch.zeros_like(nan_idx[-1])))
+            factor_vals = factor[nan_idx_factor]
+            print(f"Nan in ret!!, \n x({x.dtype}): {x_vals}, \n factor({factor.dtype}): {factor_vals} \n, ret({ret.dtype})")
+        return ret
 
     def forward(self, x):
         assert not torch.any(torch.isnan(x))
@@ -187,10 +194,11 @@ class WindowAttention(nn.Module):
 
         # Learnable parameters for lambda reparameterization
         if self.use_diffattn:
-            self.lambda_q1 = nn.Parameter(torch.randn(head_dim//2))
-            self.lambda_k1 = nn.Parameter(torch.randn(head_dim//2))
-            self.lambda_q2 = nn.Parameter(torch.randn(head_dim//2))
-            self.lambda_k2 = nn.Parameter(torch.randn(head_dim//2))
+            # Lower std normalization is extremely important. Just do a simulation and you will see.
+            self.lambda_q1 = nn.Parameter(torch.zeros(head_dim//2, dtype=torch.float32)).normal_(mean=0, std=0.1)
+            self.lambda_k1 = nn.Parameter(torch.zeros(head_dim//2, dtype=torch.float32)).normal_(mean=0, std=0.1)
+            self.lambda_q2 = nn.Parameter(torch.zeros(head_dim//2, dtype=torch.float32)).normal_(mean=0, std=0.1)
+            self.lambda_k2 = nn.Parameter(torch.zeros(head_dim//2, dtype=torch.float32)).normal_(mean=0, std=0.1)
         else:
             self.register_parameter('lambda_q1', None)
             self.register_parameter('lambda_q2', None)
