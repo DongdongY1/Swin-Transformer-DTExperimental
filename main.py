@@ -32,7 +32,6 @@ from utils import load_checkpoint, load_pretrained, save_checkpoint, NativeScale
 
 # pytorch major version (1.x or 2.x)
 PYTORCH_MAJOR_VERSION = int(torch.__version__.split('.')[0])
-torch.autograd.set_detect_anomaly(True)
 
 def parse_option():
     parser = argparse.ArgumentParser('Swin Transformer training and evaluation script', add_help=False)
@@ -191,8 +190,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        assert not torch.any(torch.isnan(samples) + torch.isinf(samples))
-        assert not torch.any(torch.isnan(targets) + torch.isinf(targets))
+        #assert not torch.any(torch.isnan(samples) + torch.isinf(samples))
+        #assert not torch.any(torch.isnan(targets) + torch.isinf(targets))
 
         with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
             outputs = model(samples)
