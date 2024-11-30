@@ -72,11 +72,9 @@ class SwiGLU(nn.Module):
         """
         # Apply the gates
         g = torch.nn.functional.silu(self.WG(x))  # Activation part
-        assert not torch.any(torch.isnan(g))
         z = self.W1(x)            # Linear part
         # Element-wise multiplication and projection
         ret = self.W2(g * z)
-        assert not torch.any(torch.isnan(ret))
         return ret
 
 
@@ -94,28 +92,26 @@ class RMSNorm(nn.Module):
 
     def _norm(self, x):
         pow2 = x.pow(2)
-        if torch.any(torch.isnan(pow2)):
-            print(f"Nan!!!, x: {x},\n pow2: {pow2}")
 
         mean = pow2.nanmean(-1, keepdim=True)
         factor = torch.rsqrt(mean + self.eps)
-        assert not torch.any(torch.isnan(factor)), f"Nan in factor!!, \n mean: {mean}, \n factor: {factor}"
+        #assert not torch.any(torch.isnan(factor)), f"Nan in factor!!, \n mean: {mean}, \n factor: {factor}"
         ret = x * factor
-        if torch.any(torch.isnan(ret)):
-            nan_idx = torch.where(torch.isnan(ret))
-            x_vals = x[nan_idx]
-            nan_idx_factor = tuple((*nan_idx[:-1], torch.zeros_like(nan_idx[-1])))
-            factor_vals = factor[nan_idx_factor]
-            print(f"Nan in ret!!, \n x({x.dtype}): {x_vals}, \n factor({factor.dtype}): {factor_vals} \n, ret({ret.dtype})")
+        # if torch.any(torch.isnan(ret)):
+        #     nan_idx = torch.where(torch.isnan(ret))
+        #     x_vals = x[nan_idx]
+        #     nan_idx_factor = tuple((*nan_idx[:-1], torch.zeros_like(nan_idx[-1])))
+        #     factor_vals = factor[nan_idx_factor]
+        #     print(f"Nan in ret!!, \n x({x.dtype}): {x_vals}, \n factor({factor.dtype}): {factor_vals} \n, ret({ret.dtype})")
         return ret
 
     def forward(self, x):
-        assert not torch.any(torch.isnan(x))
+        #assert not torch.any(torch.isnan(x))
         output = self._norm(x) # original version with x.float(). Probly better not to cast when amp is enabled
-        assert not torch.any(torch.isnan(output))
+        #assert not torch.any(torch.isnan(output))
         if self.weight is not None:
             output = output * self.weight
-            assert not torch.any(torch.isnan(output))
+            #assert not torch.any(torch.isnan(output))
         return output
 
     def extra_repr(self) -> str:
@@ -292,6 +288,10 @@ class WindowAttention(nn.Module):
             x = (attn @ v).transpose(1, 2) #.reshape(B_, N, C)
 
         if self.use_groupnorm:
+            # if torch.any(torch.isinf(x)):
+            #     print(f"inf in x!, lambda_: {lambda_}, lambda_init: {self.lambda_init}, v.shape: {v.shape}, v.norm: {v.norm()}",
+            #           f"lambda_norms: {self.lambda_q1.norm()}, {self.lambda_q2.norm()}, {self.lambda_k1.norm()}, {self.lambda_k2.norm()}",
+            #           f"lambda_prod1: {self.lambda_q1 @ self.lambda_k1}, lambda_prod2: {self.lambda_q2 @ self.lambda_k2}")
             x = self.groupnorm(x) # (B_, N, heads, head_dim)
 
         x = x.reshape(B_, N, C) #  ->(B_, heads, N, head_dim) and concats to (B_, N, dimC)
